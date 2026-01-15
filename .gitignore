@@ -1,0 +1,40 @@
+# Build results
+[Bb]in/
+[Oo]bj/
+[Oo]ut/
+
+# IDE - Rider/IntelliJ
+.idea/
+
+# IDE - Visual Studio
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.sln.DotSettings.user
+
+# IDE - VS Code
+.vscode/
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# Build artifacts
+*.dll
+*.exe
+*.pdb
+*.cache
+
+# User-specific files
+*.rsuser
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store

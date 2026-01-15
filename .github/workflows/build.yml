@@ -1,0 +1,170 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+env:
+  PROJECT_NAME: CustomKillCooldown
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.get_version.outputs.version }}
+      should_release: ${{ steps.check_release.outputs.should_release }}
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '6.0.x'
+
+    - name: Get version from csproj
+      id: get_version
+      shell: pwsh
+      run: |
+        $csproj = Get-Content "${{ env.PROJECT_NAME }}/${{ env.PROJECT_NAME }}.csproj" -Raw
+        if ($csproj -match '<Version>([^<]+)</Version>') {
+          $version = $matches[1]
+        } else {
+          $version = "1.0.0"
+        }
+        echo "version=$version" >> $env:GITHUB_OUTPUT
+        echo "Version: $version"
+
+    - name: Check if release needed
+      id: check_release
+      shell: pwsh
+      run: |
+        $tagExists = git tag -l "v${{ steps.get_version.outputs.version }}"
+        if ($tagExists) {
+          echo "should_release=false" >> $env:GITHUB_OUTPUT
+          echo "Tag v${{ steps.get_version.outputs.version }} already exists, skipping release"
+        } else {
+          echo "should_release=true" >> $env:GITHUB_OUTPUT
+          echo "Will create release for v${{ steps.get_version.outputs.version }}"
+        }
+
+    - name: Generate GitHub App token
+      id: app-token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ secrets.APP_ID }}
+        private-key: ${{ secrets.APP_PRIVATE_KEY }}
+        owner: ClazAU
+
+    - name: Download ClazAU dependencies
+      shell: pwsh
+      run: |
+        $csprojPath = "${{ env.PROJECT_NAME }}/${{ env.PROJECT_NAME }}.csproj"
+        $csproj = Get-Content $csprojPath -Raw
+
+        # Find all HintPath references matching ClazAU mod pattern
+        $pattern = '<HintPath>\.\.\\\.\.\\([^\\]+)\\[^\\]+\\bin\\Release\\net6\.0\\([^<]+)\.dll</HintPath>'
+        $matches = [regex]::Matches($csproj, $pattern)
+
+        if ($matches.Count -eq 0) {
+          echo "No ClazAU dependencies found"
+          exit 0
+        }
+
+        foreach ($match in $matches) {
+          $modName = $match.Groups[1].Value
+          $dllName = $match.Groups[2].Value
+
+          echo "Found dependency: $modName ($dllName.dll)"
+
+          $modPath = "../$modName/$modName/bin/Release/net6.0"
+          New-Item -ItemType Directory -Force -Path $modPath | Out-Null
+
+          echo "Downloading $dllName.dll from ClazAU/$modName..."
+          gh release download --repo ClazAU/$modName --pattern "$dllName.dll" --dir $modPath
+
+          if (Test-Path "$modPath/$dllName.dll") {
+            echo "Successfully downloaded $dllName.dll"
+          } else {
+            echo "::error::Failed to download $dllName.dll"
+            exit 1
+          }
+        }
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+    - name: Restore dependencies
+      run: dotnet restore
+
+    - name: Build
+      run: dotnet build --no-restore --configuration Release
+
+    - name: Upload build artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.PROJECT_NAME }}
+        path: ${{ env.PROJECT_NAME }}/bin/Release/net6.0/${{ env.PROJECT_NAME }}.dll
+
+  upload-to-panel:
+    needs: build
+    runs-on: ubuntu-latest
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.build.outputs.should_release == 'true'
+
+    steps:
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ env.PROJECT_NAME }}
+
+    - name: Upload to Panel API
+      shell: bash
+      run: |
+        if [ -z "${{ secrets.PANEL_API_URL }}" ] || [ -z "${{ secrets.PANEL_API_KEY }}" ]; then
+          echo "::warning::PANEL_API_URL or PANEL_API_KEY not configured, skipping upload"
+          exit 0
+        fi
+
+        echo "Uploading ${{ env.PROJECT_NAME }}.dll to panel..."
+
+        HTTP_STATUS=$(curl -s -o response.txt -w "%{http_code}" \
+          -X POST "${{ secrets.PANEL_API_URL }}/api/mods/upload" \
+          -H "X-API-Key: ${{ secrets.PANEL_API_KEY }}" \
+          -F "dll=@${{ env.PROJECT_NAME }}.dll")
+
+        if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+          echo "Upload successful (HTTP $HTTP_STATUS)"
+          cat response.txt
+        else
+          echo "::warning::Upload failed with HTTP $HTTP_STATUS"
+          cat response.txt
+        fi
+
+  release:
+    needs: [build, upload-to-panel]
+    runs-on: ubuntu-latest
+    if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && needs.build.outputs.should_release == 'true'
+    permissions:
+      contents: write
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Download artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ env.PROJECT_NAME }}
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ needs.build.outputs.version }}
+        name: ${{ env.PROJECT_NAME }} v${{ needs.build.outputs.version }}
+        files: ${{ env.PROJECT_NAME }}.dll
+        generate_release_notes: true
+        draft: false
+        prerelease: false
