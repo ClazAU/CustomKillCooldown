@@ -7,7 +7,6 @@ using MiraAPI.PluginLoading;
 using Reactor;
 using Reactor.Networking;
 using Reactor.Networking.Attributes;
-using Reactor.Utilities;
 
 namespace CustomKillCooldown;
 
